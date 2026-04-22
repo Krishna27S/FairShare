@@ -2,12 +2,14 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useApp } from '@/lib/app-context';
-import { supabase, Expense, ExpenseSplit, GroupMember } from '@/lib/supabase';
+import { supabase, Expense, ExpenseSplit, GroupMember, Settlement } from '@/lib/supabase';
 import { realtimeManager, SubscriptionHandler } from '@/lib/realtime-utils';
 import { parseError, logError } from '@/lib/error-handler';
 import { deleteGroup } from '@/lib/member-utils';
 import { toastManager } from '@/lib/toast';
-import { ChevronLeft, BarChart3, Plus, AlertCircle } from 'lucide-react';
+import { calculateOptimizedSettlements, settleAllGroupPayments } from '@/lib/expense-utils';
+import { logActivity } from '@/lib/activity-utils';
+import { ChevronLeft, BarChart3, Plus, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 function getFirstName(name?: string | null, email?: string | null) {
   const fullName = (name || '').trim();
@@ -20,17 +22,45 @@ function getFirstName(name?: string | null, email?: string | null) {
 export function GroupDetailScreen() {
   const { currentUser, selectedGroupId, setScreen } = useApp();
   const [groupName, setGroupName] = useState('');
-  const [tab, setTab] = useState<'balances' | 'expenses'>('balances');
+  const [tab, setTab] = useState<'balances' | 'expenses' | 'settlements'>('balances');
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [members, setMembers] = useState<GroupMember[]>([]);
   const [balances, setBalances] = useState<Record<string, number>>({});
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [connectionError, setConnectionError] = useState(false);
   const [isGroupCreator, setIsGroupCreator] = useState(false);
   const [deletingGroup, setDeletingGroup] = useState(false);
+  const [settlingAll, setSettlingAll] = useState(false);
   const [memberNames, setMemberNames] = useState<Record<string, string>>({});
   const unsubscribeRef = useRef<(() => void) | null>(null);
+
+  const getSettlementHintForMember = (memberId: string) => {
+    const toPay = settlements.filter((s) => s.from_user_id === memberId);
+    if (toPay.length > 0) {
+      const first = toPay[0];
+      const payeeName = memberNames[first.to_user_id] || 'Member';
+      if (toPay.length === 1) {
+        return `Pay ${payeeName} Rs. ${Number(first.amount).toFixed(2)}`;
+      }
+      const totalToPay = toPay.reduce((sum, s) => sum + Number(s.amount || 0), 0);
+      return `Pay ${toPay.length} members Rs. ${totalToPay.toFixed(2)}`;
+    }
+
+    const toReceive = settlements.filter((s) => s.to_user_id === memberId);
+    if (toReceive.length > 0) {
+      const first = toReceive[0];
+      const payerName = memberNames[first.from_user_id] || 'Member';
+      if (toReceive.length === 1) {
+        return `Gets Rs. ${Number(first.amount).toFixed(2)} from ${payerName}`;
+      }
+      const totalToReceive = toReceive.reduce((sum, s) => sum + Number(s.amount || 0), 0);
+      return `Gets from ${toReceive.length} members Rs. ${totalToReceive.toFixed(2)}`;
+    }
+
+    return 'All clear';
+  };
 
   const loadData = useCallback(async () => {
     if (!selectedGroupId) return;
@@ -83,20 +113,65 @@ export function GroupDetailScreen() {
         .select('*')
         .in('expense_id', expensesData?.map((e) => e.id) || []);
 
+      const { data: confirmedPayments } = await supabase
+        .from('settlements')
+        .select('from_user_id, to_user_id, amount')
+        .eq('group_id', selectedGroupId)
+        .eq('status', 'confirmed');
+
       const balancesMap: Record<string, number> = {};
       (membersData || []).forEach((member) => {
         balancesMap[member.user_id] = 0;
       });
 
       (expensesData || []).forEach((expense) => {
-        balancesMap[expense.paid_by] = (balancesMap[expense.paid_by] || 0) + expense.amount;
+        balancesMap[expense.paid_by] = (balancesMap[expense.paid_by] || 0) + Number(expense.amount || 0);
       });
 
       (splits || []).forEach((split) => {
-        balancesMap[split.user_id] = (balancesMap[split.user_id] || 0) - split.amount;
+        balancesMap[split.user_id] = (balancesMap[split.user_id] || 0) - Number(split.amount || 0);
+      });
+
+      // Confirmed payments reduce outstanding balances only after creditor confirmation.
+      (confirmedPayments || []).forEach((payment) => {
+        balancesMap[payment.from_user_id] =
+          (balancesMap[payment.from_user_id] || 0) + Number(payment.amount || 0);
+        balancesMap[payment.to_user_id] =
+          (balancesMap[payment.to_user_id] || 0) - Number(payment.amount || 0);
       });
 
       setBalances(balancesMap);
+
+      // Load settlements
+      const { data: settlementsData } = await supabase
+        .from('settlements')
+        .select('*')
+        .eq('group_id', selectedGroupId)
+        .eq('is_settled', false);
+
+      const openSettlements = settlementsData || [];
+      if (openSettlements.length > 0) {
+        setSettlements(openSettlements);
+      } else {
+        // Fallback in case pending rows are not created yet: derive from balances.
+        const computedSettlements = calculateOptimizedSettlements(
+          expensesData || [],
+          splits || [],
+          [],
+          (membersData || []).map((m) => m.user_id)
+        ).map((s) => ({
+          id: `${s.from}-${s.to}`,
+          group_id: selectedGroupId,
+          from_user_id: s.from,
+          to_user_id: s.to,
+          amount: s.amount,
+          is_settled: false,
+          status: 'pending' as const,
+          settled_at: null,
+          created_at: new Date().toISOString(),
+        }));
+        setSettlements(computedSettlements);
+      }
       setConnectionError(false);
     } catch (error: any) {
       console.error('[v0] Error loading group data:', error);
@@ -153,6 +228,45 @@ export function GroupDetailScreen() {
       }
     };
   }, [selectedGroupId, loadData, setupRealtimeSubscriptions]);
+
+  // Check if there are any non-zero balances
+  const hasUnsettledBalances = Object.values(balances).some((b) => Math.abs(b) > 0.01);
+
+  async function handleSettleAllPayments() {
+    if (!selectedGroupId || !currentUser?.id) return;
+
+    const confirmed = window.confirm(
+      'Settle all payments for this group? This will mark all dues as paid and confirmed.'
+    );
+    if (!confirmed) return;
+
+    setSettlingAll(true);
+    try {
+      const count = await settleAllGroupPayments(selectedGroupId);
+
+      // Log activity
+      try {
+        await logActivity(
+          'all_payments_settled',
+          currentUser.id,
+          selectedGroupId,
+          `All payments settled (${count} settlements)`,
+          { settledCount: count }
+        );
+      } catch {
+        // Non-blocking
+      }
+
+      toastManager.success(`All payments settled! (${count} settlement${count !== 1 ? 's' : ''})`);
+      await loadData(); // Reload to reflect zero balances
+    } catch (settleError: any) {
+      const appError = parseError(settleError);
+      toastManager.error(appError.userMessage);
+      logError(appError, 'settleAllPayments');
+    } finally {
+      setSettlingAll(false);
+    }
+  }
 
   async function handleDeleteGroup() {
     if (!selectedGroupId) return;
@@ -224,17 +338,36 @@ export function GroupDetailScreen() {
       <div className="px-6 pb-4 text-muted-foreground text-sm">
         {members.length} members
       </div>
+      {/* Settle All Payments — visible when there are unsettled balances */}
+      {hasUnsettledBalances && (
+        <div className="px-6 pb-3">
+          <button
+            onClick={handleSettleAllPayments}
+            disabled={settlingAll}
+            className="w-full bg-success/15 text-success font-bold py-2.5 px-4 rounded-lg hover:bg-success/25 transition disabled:opacity-50 flex items-center justify-center gap-2 border border-success/30"
+          >
+            <CheckCircle2 size={18} />
+            {settlingAll ? 'Settling...' : 'Settle All Payments'}
+          </button>
+          <p className="text-muted-foreground text-xs mt-2">
+            Mark all dues as paid and confirmed for every member.
+          </p>
+        </div>
+      )}
+
       {isGroupCreator && (
         <div className="px-6 pb-4">
           <button
             onClick={handleDeleteGroup}
-            disabled={deletingGroup}
-            className="w-full bg-destructive/20 text-destructive font-bold py-2.5 px-4 rounded-lg hover:bg-destructive/30 transition disabled:opacity-50"
+            disabled={deletingGroup || hasUnsettledBalances}
+            className="w-full bg-destructive/20 text-destructive font-bold py-2.5 px-4 rounded-lg hover:bg-destructive/30 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {deletingGroup ? 'Deleting...' : 'Delete Group'}
           </button>
           <p className="text-muted-foreground text-xs mt-2">
-            You can delete this group only when all dues/debts and settlements are cleared.
+            {hasUnsettledBalances
+              ? 'Settle all payments first before deleting the group.'
+              : 'All dues are cleared. You can safely delete this group.'}
           </p>
         </div>
       )}
@@ -256,11 +389,21 @@ export function GroupDetailScreen() {
           onClick={() => setTab('expenses')}
           className={`flex-1 py-2 px-4 rounded-lg font-semibold transition ${
             tab === 'expenses'
-              ? 'bg-primary text-primary-foreground'
-              : 'bg-secondary text-foreground'
+              ? 'bg-primary text-primary-foreground text-xs sm:text-sm'
+              : 'bg-secondary text-foreground text-xs sm:text-sm'
           }`}
         >
           Expenses
+        </button>
+        <button
+          onClick={() => setTab('settlements')}
+          className={`flex-1 py-2 px-4 rounded-lg font-semibold transition ${
+            tab === 'settlements'
+              ? 'bg-primary text-primary-foreground text-xs sm:text-sm'
+              : 'bg-secondary text-foreground text-xs sm:text-sm'
+          }`}
+        >
+          Settles
         </button>
       </div>
 
@@ -273,13 +416,21 @@ export function GroupDetailScreen() {
                 <p className="font-semibold text-foreground">
                   {memberNames[member.user_id] || 'Member'}
                 </p>
-                <p className={`text-lg font-bold ${balances[member.user_id] > 0 ? 'text-green-500' : 'text-red-500'}`}>
-                  {balances[member.user_id] > 0 ? '+' : ''}Rs. {balances[member.user_id].toFixed(0)}
+                <div className="flex items-center justify-between">
+                  <p className={`text-lg font-bold ${balances[member.user_id] > 0 ? 'text-green-500' : (balances[member.user_id] < 0 ? 'text-red-500' : 'text-muted-foreground')}`}>
+                    {balances[member.user_id] > 0 ? '+' : ''}Rs. {Math.abs(balances[member.user_id] || 0).toFixed(2)}
+                  </p>
+                  <p className="text-muted-foreground text-xs">
+                    {balances[member.user_id] > 0 ? 'gets back' : (balances[member.user_id] < 0 ? 'owes' : 'settled')}
+                  </p>
+                </div>
+                <p className="text-xs mt-2 text-muted-foreground">
+                  {getSettlementHintForMember(member.user_id)}
                 </p>
               </div>
             ))}
           </div>
-        ) : (
+        ) : tab === 'expenses' ? (
           <div className="space-y-3">
             {expenses.map((expense) => (
               <div key={expense.id} className="bg-card rounded-lg p-4 border border-border">
@@ -288,10 +439,46 @@ export function GroupDetailScreen() {
                   <span className="text-lg font-bold text-foreground">Rs {expense.amount}</span>
                 </div>
                 <p className="text-muted-foreground text-sm">
-                  Paid by {memberNames[expense.paid_by] || 'Member'} • {new Date(expense.created_at).toLocaleDateString()}
+                  <span className="text-success font-semibold">Paid by {memberNames[expense.paid_by] || 'Member'}</span> • {new Date(expense.created_at).toLocaleDateString()}
                 </p>
               </div>
             ))}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {settlements.length === 0 ? (
+              <div className="text-center py-12">
+                <p className="text-muted-foreground">Everyone is settled up! no pending payments. 🎉</p>
+              </div>
+            ) : (
+              <>
+                {settlements.map((settlement) => (
+                  <div key={settlement.id} className="bg-card rounded-lg p-4 border border-border">
+                    <p className="font-semibold text-foreground mb-1">
+                      {memberNames[settlement.from_user_id]} <span className="text-muted-foreground font-normal mx-1 text-xs uppercase">has to pay</span> {memberNames[settlement.to_user_id]}
+                    </p>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xl font-bold text-destructive">
+                        Rs {settlement.amount.toFixed(0)}
+                      </p>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase border ${
+                        settlement.status === 'paid' ? 'bg-amber-500/10 border-amber-500/30 text-amber-500' : 'bg-blue-500/10 border-blue-500/30 text-blue-500'
+                      }`}>
+                        {settlement.status === 'paid' ? 'Awaiting Confirmation' : 'Pending'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                <div className="pt-2">
+                  <button 
+                    onClick={() => setScreen('settlements')}
+                    className="w-full py-3 px-4 rounded-lg bg-primary/10 text-primary font-bold hover:bg-primary/20 transition text-sm"
+                  >
+                    Go to Payments to record a settle
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>

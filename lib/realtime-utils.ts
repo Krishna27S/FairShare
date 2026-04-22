@@ -26,6 +26,14 @@ class RealtimeManager {
     // Store handler for cleanup
     this.subscriptions.set(channelKey, handler);
 
+    // Remove existing channel if it exists to avoid
+    // "cannot add callbacks after subscribe()" error on re-renders
+    const existingChannel = this.channels.get(channelKey);
+    if (existingChannel) {
+      supabase.removeChannel(existingChannel);
+      this.channels.delete(channelKey);
+    }
+
     try {
       // Create channel for expenses table
       const channel = supabase
@@ -76,6 +84,12 @@ class RealtimeManager {
     const channelKey = `group-settlements-${groupId}`;
 
     this.subscriptions.set(channelKey, handler);
+
+    const existingChannel = this.channels.get(channelKey);
+    if (existingChannel) {
+      supabase.removeChannel(existingChannel);
+      this.channels.delete(channelKey);
+    }
 
     try {
       const channel = supabase
@@ -139,6 +153,12 @@ class RealtimeManager {
 
     this.subscriptions.set(channelKey, handler);
 
+    const existingChannel = this.channels.get(channelKey);
+    if (existingChannel) {
+      supabase.removeChannel(existingChannel);
+      this.channels.delete(channelKey);
+    }
+
     try {
       const channel = supabase
         .channel(`members-${groupId}`)
@@ -184,6 +204,12 @@ class RealtimeManager {
     const channelKey = 'activity-log';
 
     this.subscriptions.set(channelKey, handler);
+
+    const existingChannel = this.channels.get(channelKey);
+    if (existingChannel) {
+      supabase.removeChannel(existingChannel);
+      this.channels.delete(channelKey);
+    }
 
     try {
       const channel = supabase

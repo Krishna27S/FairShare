@@ -62,6 +62,8 @@ export function ActivityScreen() {
   const [loading, setLoading] = useState(true);
   const [selectedTab, setSelectedTab] = useState<'activity' | 'profile'>('activity');
   const [signingOut, setSigningOut] = useState(false);
+  const [groupCount, setGroupCount] = useState<number | null>(null);
+  const [memberSince, setMemberSince] = useState<string>('');
 
   const loadActivities = useCallback(async () => {
     if (!currentUser?.id) return;
@@ -74,6 +76,19 @@ export function ActivityScreen() {
         .eq('user_id', currentUser.id);
 
       const groupIds = userGroups?.map((g) => g.group_id) || [];
+      setGroupCount(groupIds.length);
+
+      // Load member since date
+      const { data: userData } = await supabase
+        .from('users')
+        .select('created_at')
+        .eq('id', currentUser.id)
+        .single();
+
+      if (userData?.created_at) {
+        const date = new Date(userData.created_at);
+        setMemberSince(date.toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }));
+      }
 
       if (groupIds.length === 0) {
         setActivities([]);
@@ -222,12 +237,12 @@ export function ActivityScreen() {
               <div className="bg-card rounded-lg p-4 border border-border">
                 <p className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Member Since</p>
                 <p className="font-bold text-foreground">
-                  Recently
+                  {memberSince || 'Recently'}
                 </p>
               </div>
               <div className="bg-card rounded-lg p-4 border border-border">
                 <p className="text-muted-foreground text-xs uppercase tracking-wide mb-1">Total Groups</p>
-                <p className="font-bold text-foreground">--</p>
+                <p className="font-bold text-foreground">{groupCount !== null ? groupCount : '--'}</p>
               </div>
             </div>
           </div>
