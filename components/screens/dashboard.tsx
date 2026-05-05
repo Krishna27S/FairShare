@@ -3,14 +3,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useApp } from '@/lib/app-context';
 import { getUserTotalBalance, getUserGroupBalance } from '@/lib/expense-utils';
-import { supabase, Group, User } from '@/lib/supabase';
-import { getUserProfile } from '@/lib/auth-utils';
+import { supabase, Group } from '@/lib/supabase';
 import { parseError, logError } from '@/lib/error-handler';
 import { ChevronRight, Building2, Plus } from 'lucide-react';
 
 export function DashboardScreen() {
-  const { currentUser, setScreen, setSelectedGroupId, userRole } = useApp();
-  const [userProfile, setUserProfile] = useState<User | null>(null);
+  const { currentUser, setScreen, setSelectedGroupId, userRole, userProfile } = useApp();
   const [groups, setGroups] = useState<Group[]>([]);
   const [organisations, setOrganisations] = useState<any[]>([]);
   const [balances, setBalances] = useState<{ owes: number; getsBack: number }>({
@@ -24,14 +22,19 @@ export function DashboardScreen() {
   const [monthlyBudget, setMonthlyBudget] = useState(15000);
   const [loading, setLoading] = useState(true);
 
+  // Keep monthlyBudget in sync with the context's userProfile
+  useEffect(() => {
+    if (userProfile?.monthly_budget) {
+      setMonthlyBudget(userProfile.monthly_budget);
+    }
+  }, [userProfile]);
+
   const loadData = useCallback(async () => {
     if (!currentUser?.id) return;
 
     try {
-      // Load user profile
-      const profile = await getUserProfile(currentUser.id);
-      setUserProfile(profile);
-      setMonthlyBudget(profile?.monthly_budget || 15000);
+      // Use budget from context's userProfile (already kept in sync above)
+      setMonthlyBudget(userProfile?.monthly_budget || 15000);
 
       if (userRole === 'individual') {
         // Load groups for individual users
@@ -74,20 +77,43 @@ export function DashboardScreen() {
         const totalBalance = await getUserTotalBalance(currentUser.id);
         setBalances(totalBalance);
 
-        // Load monthly spending
+        // Calculate monthly spending directly from expense splits
+        // This is the user's share of all expenses in the current month
         const now = new Date();
-        const monthYear = new Date(now.getFullYear(), now.getMonth(), 1)
-          .toISOString()
-          .split('T')[0];
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+        const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString();
 
-        const { data: monthlyData } = await supabase
-          .from('monthly_spending')
-          .select('total_spent')
-          .eq('user_id', currentUser.id)
-          .eq('month_year', monthYear)
-          .single();
+        // Get all group IDs the user belongs to
+        const groupIds = (memberData || []).map((m: any) => m.group_id);
 
-        setMonthlySpent(monthlyData?.total_spent || 0);
+        if (groupIds.length > 0) {
+          // Get all expenses in user's groups for the current month
+          const { data: monthExpenses } = await supabase
+            .from('expenses')
+            .select('id')
+            .in('group_id', groupIds)
+            .gte('created_at', monthStart)
+            .lt('created_at', monthEnd);
+
+          if (monthExpenses && monthExpenses.length > 0) {
+            // Get the user's splits for these expenses
+            const { data: userSplits } = await supabase
+              .from('expense_splits')
+              .select('amount')
+              .eq('user_id', currentUser.id)
+              .in('expense_id', monthExpenses.map((e) => e.id));
+
+            const totalSpent = (userSplits || []).reduce(
+              (sum, split) => sum + Number(split.amount || 0),
+              0
+            );
+            setMonthlySpent(totalSpent);
+          } else {
+            setMonthlySpent(0);
+          }
+        } else {
+          setMonthlySpent(0);
+        }
       } else if (userRole === 'organisation') {
         // Load organisations for org users
         const { data: orgs } = await supabase
@@ -103,7 +129,7 @@ export function DashboardScreen() {
     } finally {
       setLoading(false);
     }
-  }, [currentUser?.id, userRole]);
+  }, [currentUser?.id, userRole, userProfile]);
 
   useEffect(() => {
     loadData();

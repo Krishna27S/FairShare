@@ -23,24 +23,86 @@ export function SpendingAnalysisScreen() {
     if (!currentUser?.id) return;
 
     try {
-      const { data, error } = await supabase
-        .from('monthly_spending')
-        .select('*')
+      // Get user's budget from profile
+      const { data: profile } = await supabase
+        .from('users')
+        .select('monthly_budget')
+        .eq('id', currentUser.id)
+        .single();
+
+      const budget = profile?.monthly_budget || 15000;
+
+      // Get all group IDs the user belongs to
+      const { data: memberData } = await supabase
+        .from('group_members')
+        .select('group_id')
+        .eq('user_id', currentUser.id);
+
+      const groupIds = (memberData || []).map((m: any) => m.group_id);
+
+      if (groupIds.length === 0) {
+        setSpending([]);
+        setLoading(false);
+        return;
+      }
+
+      // Get all expenses across the user's groups
+      const { data: allExpenses, error: expError } = await supabase
+        .from('expenses')
+        .select('id, created_at')
+        .in('group_id', groupIds)
+        .order('created_at', { ascending: false });
+
+      if (expError) throw expError;
+
+      if (!allExpenses || allExpenses.length === 0) {
+        setSpending([]);
+        setLoading(false);
+        return;
+      }
+
+      // Get the user's splits for all these expenses
+      const { data: userSplits, error: splitError } = await supabase
+        .from('expense_splits')
+        .select('expense_id, amount')
         .eq('user_id', currentUser.id)
-        .order('month_year', { ascending: false });
+        .in('expense_id', allExpenses.map((e) => e.id));
 
-      if (error) throw error;
+      if (splitError) throw splitError;
 
-      const formatted = (data || []).map((item: any) => ({
-        month: new Date(item.month_year).toLocaleDateString('en-US', {
-          month: 'short',
-          year: 'numeric',
-        }),
-        spent: item.total_spent || 0,
-        budget: item.monthly_budget || 0,
-        balance: item.balance || 0,
-        date: new Date(item.month_year),
-      }));
+      // Build a map of expense_id -> created_at for quick lookup
+      const expenseDateMap: Record<string, string> = {};
+      allExpenses.forEach((e) => {
+        expenseDateMap[e.id] = e.created_at;
+      });
+
+      // Group splits by month
+      const monthlyMap: Record<string, number> = {};
+      (userSplits || []).forEach((split) => {
+        const dateStr = expenseDateMap[split.expense_id];
+        if (!dateStr) return;
+        const d = new Date(dateStr);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        monthlyMap[key] = (monthlyMap[key] || 0) + Number(split.amount || 0);
+      });
+
+      // Convert to sorted array
+      const formatted: MonthlyData[] = Object.entries(monthlyMap)
+        .map(([key, spent]) => {
+          const [year, month] = key.split('-').map(Number);
+          const date = new Date(year, month - 1, 1);
+          return {
+            month: date.toLocaleDateString('en-US', {
+              month: 'short',
+              year: 'numeric',
+            }),
+            spent,
+            budget,
+            balance: budget - spent,
+            date,
+          };
+        })
+        .sort((a, b) => b.date.getTime() - a.date.getTime());
 
       setSpending(formatted);
       if (formatted.length > 0) {
