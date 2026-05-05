@@ -5,6 +5,7 @@ import { useApp } from '@/lib/app-context';
 import { supabase, Group } from '@/lib/supabase';
 import { toastManager } from '@/lib/toast';
 import { logActivity } from '@/lib/activity-utils';
+import { isValidEmail } from '@/lib/auth-utils';
 import { ChevronLeft, Plus, Search, AlertCircle } from 'lucide-react';
 
 type GroupWithStats = Group & {
@@ -117,8 +118,27 @@ export function GroupsScreen() {
       if (!groupName.trim()) {
         throw new Error('Group name is required');
       }
+      // Parse member emails
+      const memberEmails = groupMembers
+        .split(',')
+        .map((e) => e.trim())
+        .filter((e) => e && e !== currentUser.email); // Exclude empty and creator's email
 
-      // Create group
+      // Validate ALL email formats BEFORE creating the group
+      const invalidEmails: string[] = [];
+      for (const email of memberEmails) {
+        if (!isValidEmail(email)) {
+          invalidEmails.push(email);
+        }
+      }
+
+      if (invalidEmails.length > 0) {
+        throw new Error(
+          `Invalid email${invalidEmails.length > 1 ? 's' : ''}: ${invalidEmails.join(', ')}. Please enter valid email addresses.`
+        );
+      }
+
+      // Create group (only after all emails are validated)
       const { data: group, error: groupError } = await supabase
         .from('groups')
         .insert([{ name: groupName, created_by: currentUser.id }])
@@ -135,23 +155,10 @@ export function GroupsScreen() {
         },
       ]);
 
-      // Parse and validate member emails
-      const memberEmails = groupMembers
-        .split(',')
-        .map((e) => e.trim())
-        .filter((e) => e && e !== currentUser.email); // Exclude empty and creator's email
-
       const notRegisteredEmails: string[] = [];
       const addedMembers: string[] = [];
 
       for (const email of memberEmails) {
-        // Validate email format
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(email)) {
-          notRegisteredEmails.push(email);
-          continue;
-        }
-
         const { data: matchedUsers, error: findUserError } = await supabase.rpc(
           'find_registered_user_by_email',
           { search_email: email }
