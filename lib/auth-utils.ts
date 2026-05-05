@@ -1,5 +1,33 @@
 import { supabase, User } from './supabase';
 
+/**
+ * Validates an email address format.
+ * Checks for proper structure: local@domain.tld
+ */
+export function isValidEmail(email: string): boolean {
+  if (!email || typeof email !== 'string') return false;
+
+  // Trim whitespace
+  const trimmed = email.trim();
+
+  // Basic structural checks
+  if (trimmed.length === 0 || trimmed.length > 254) return false;
+
+  // RFC 5322 simplified regex for email validation
+  const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+  if (!emailRegex.test(trimmed)) return false;
+
+  // Must have at least one dot in the domain part
+  const [, domain] = trimmed.split('@');
+  if (!domain || !domain.includes('.')) return false;
+
+  // TLD must be at least 2 characters
+  const tld = domain.split('.').pop();
+  if (!tld || tld.length < 2) return false;
+
+  return true;
+}
+
 async function ensureUserProfile(
   authUser: any,
   role: 'individual' | 'organisation' = 'individual'
@@ -36,8 +64,13 @@ export async function signUp(
   fullName: string,
   role: 'individual' | 'organisation' = 'individual'
 ) {
+  // Validate email before attempting signup
+  if (!isValidEmail(email)) {
+    throw new Error('Invalid email address. Please enter a valid email (e.g. name@example.com).');
+  }
+
   const { data, error } = await supabase.auth.signUp({
-    email,
+    email: email.trim(),
     password,
     options: {
       data: {

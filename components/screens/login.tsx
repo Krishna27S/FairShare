@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { signIn, signUp } from '@/lib/auth-utils';
+import { signIn, signUp, isValidEmail } from '@/lib/auth-utils';
 import { useApp } from '@/lib/app-context';
 import { ArrowRight } from 'lucide-react';
 
@@ -14,10 +14,21 @@ export function LoginScreen() {
   const [fullName, setFullName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [emailTouched, setEmailTouched] = useState(false);
+
+  // Show inline email error only during sign-up after the field has been touched
+  const showEmailError = isSignUp && emailTouched && email.length > 0 && !isValidEmail(email);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
+
+    // Extra guard: block submission if email is invalid during sign-up
+    if (isSignUp && !isValidEmail(email)) {
+      setError('Invalid email address. Please enter a valid email (e.g. name@example.com).');
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -102,10 +113,20 @@ export function LoginScreen() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              onBlur={() => setEmailTouched(true)}
               placeholder="student@university.com"
               required
-              className="w-full px-4 py-3 rounded-lg bg-secondary border border-border focus:outline-none focus:ring-2 focus:ring-primary text-foreground"
+              className={`w-full px-4 py-3 rounded-lg bg-secondary border focus:outline-none focus:ring-2 text-foreground transition ${
+                showEmailError
+                  ? 'border-destructive focus:ring-destructive'
+                  : 'border-border focus:ring-primary'
+              }`}
             />
+            {showEmailError && (
+              <p className="text-destructive text-xs mt-1">
+                Please enter a valid email address (e.g. name@example.com)
+              </p>
+            )}
           </div>
 
           <div>
@@ -124,7 +145,7 @@ export function LoginScreen() {
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || (isSignUp && emailTouched && !isValidEmail(email))}
             className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition disabled:opacity-50"
           >
             {isSignUp ? 'Sign up' : 'Sign in'} <ArrowRight size={20} />
@@ -138,6 +159,7 @@ export function LoginScreen() {
             onClick={() => {
               setIsSignUp(!isSignUp);
               setError('');
+              setEmailTouched(false);
             }}
             className="text-primary hover:underline font-medium"
           >
